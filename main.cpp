@@ -9,6 +9,7 @@
 #include <png.h>
 #include <cmath>
 #include <algorithm>
+#include <opencv2/opencv.hpp>
 
 #define INTEL_ORDER32(x) (x)
 #define GCC_PACK __attribute__((packed))
@@ -105,89 +106,24 @@ void create_exr_header(FILE* file, int width, int height) {
 }
 
 std::vector<float> read_png_depth(const std::string& filename, int& width, int& height, float minVal, float maxVal) {
-    FILE* fp = fopen(filename.c_str(), "rb");
-    if (!fp) {
+    // Read the PNG file using OpenCV
+    cv::Mat depth_image = cv::imread(filename, cv::IMREAD_GRAYSCALE);
+    if (depth_image.empty()) {
         std::cerr << "Failed to open PNG file: " << filename << std::endl;
         exit(1);
     }
 
-    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png) {
-        std::cerr << "Failed to create PNG read struct" << std::endl;
-        fclose(fp);
-        exit(1);
-    }
+    width = depth_image.cols;
+    height = depth_image.rows;
 
-    png_infop info = png_create_info_struct(png);
-    if (!info) {
-        std::cerr << "Failed to create PNG info struct" << std::endl;
-        png_destroy_read_struct(&png, NULL, NULL);
-        fclose(fp);
-        exit(1);
-    }
-
-    if (setjmp(png_jmpbuf(png))) {
-        std::cerr << "Error during PNG creation" << std::endl;
-        png_destroy_read_struct(&png, &info, NULL);
-        fclose(fp);
-        exit(1);
-    }
-
-    png_set_user_limits(png, 1000000, 1000000);  // Set user limits to a higher value
-    png_init_io(png, fp);
-    png_read_info(png, info);
-
-    width = png_get_image_width(png, info);
-    height = png_get_image_height(png, info);
-    png_byte color_type = png_get_color_type(png, info);
-    png_byte bit_depth = png_get_bit_depth(png, info);
-
-    std::cout << "PNG Width: " << width << " Height: " << height << " Color Type: " << static_cast<int>(color_type) << " Bit Depth: " << static_cast<int>(bit_depth) << std::endl;
-
-    if (bit_depth == 16)
-        png_set_strip_16(png);
-
-    if (color_type == PNG_COLOR_TYPE_PALETTE)
-        png_set_palette_to_rgb(png);
-
-    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
-        png_set_expand_gray_1_2_4_to_8(png);
-
-    if (png_get_valid(png, info, PNG_INFO_tRNS))
-        png_set_tRNS_to_alpha(png);
-
-    if (color_type == PNG_COLOR_TYPE_RGB ||
-        color_type == PNG_COLOR_TYPE_GRAY ||
-        color_type == PNG_COLOR_TYPE_PALETTE)
-        png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
-
-    if (color_type == PNG_COLOR_TYPE_GRAY ||
-        color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
-        png_set_gray_to_rgb(png);
-
-    png_read_update_info(png, info);
-
-    std::vector<png_bytep> row_pointers(height);
-    for (int y = 0; y < height; y++) {
-        row_pointers[y] = (png_byte*)malloc(png_get_rowbytes(png, info));
-    }
-
-    png_read_image(png, row_pointers.data());
-
-    fclose(fp);
-
+    // Convert the depth image to a vector of floats
     std::vector<float> depth_data(width * height);
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            float normalized_value = static_cast<float>(row_pointers[y][x]) / 255.0f;
+            float normalized_value = static_cast<float>(depth_image.at<uint8_t>(y, x)) / 255.0f;
             depth_data[y * width + x] = normalized_value * (maxVal - minVal) + minVal;
         }
     }
-
-    for (int y = 0; y < height; y++) {
-        free(row_pointers[y]);
-    }
-    png_destroy_read_struct(&png, &info, NULL);
 
     return depth_data;
 }
@@ -234,79 +170,26 @@ std::vector<float> read_exr_depth(const std::string& filename, int& width, int& 
     fclose(file);
     return depth_data;
 }
-
 void write_png_depth(const std::string& filename, const std::vector<float>& depth_data, int width, int height, float minVal, float maxVal) {
-    FILE* fp = fopen(filename.c_str(), "wb");
-    if (!fp) {
-        std::cerr << "Failed to open PNG file for writing: " << filename << std::endl;
-        return;
-    }
-
-    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png) {
-        std::cerr << "Failed to create PNG write struct" << std::endl;
-        fclose(fp);
-        return;
-    }
-
-    png_infop info = png_create_info_struct(png);
-    if (!info) {
-        std::cerr << "Failed to create PNG info struct" << std::endl;
-        png_destroy_write_struct(&png, NULL);
-        fclose(fp);
-        return;
-    }
-
-    if (setjmp(png_jmpbuf(png))) {
-        std::cerr << "Error during PNG creation" << std::endl;
-        png_destroy_write_struct(&png, &info);
-        fclose(fp);
-        return;
-    }
-
-    png_set_user_limits(png, 1000000, 1000000);  // Set user limits to a higher value
-
-    png_init_io(png, fp);
-
-    png_set_IHDR(
-            png, info, width, height,
-            8, PNG_COLOR_TYPE_GRAY, PNG_INTERLACE_NONE,
-            PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT
-    );
-
-    png_write_info(png, info);
-
-    // Print dimensions for debugging
-    std::cout << "Writing PNG: Width = " << width << ", Height = " << height << std::endl;
-
-    std::vector<png_bytep> row_pointers(height);
+    // Normalize depth data to 0-255 range
+    cv::Mat depth_image(height, width, CV_8UC1);
     for (int y = 0; y < height; y++) {
-        row_pointers[y] = (png_byte*)malloc(width * sizeof(png_byte));
         for (int x = 0; x < width; x++) {
             float value = depth_data[y * width + x];
-            png_byte normalized_value = static_cast<png_byte>(std::round(((value - minVal) / (maxVal - minVal)) * 255.0f));
-            row_pointers[y][x] = normalized_value;
-        }
+            uint8_t normalized_value = static_cast<uint8_t>(std::round(((value - minVal) / (maxVal - minVal)) * 255.0f));
+            depth_image.at<uint8_t>(y, x) = normalized_value;
 
-        // Print values for each row for debugging
-        if (y < 3 || y > height - 3) {  // Print first and last 3 rows
-            std::cout << "Row " << y << ": ";
-            for (int x = 0; x < std::min(width, 10); ++x) {
-                std::cout << static_cast<int>(row_pointers[y][x]) << " ";
+            // Print some normalized values for debugging
+            if (y < 3 && x < 10) {  // Print first 10 values of the first 3 rows
+                std::cout << "Row " << y << ", Col " << x << " - Original: " << value << ", Normalized: " << static_cast<int>(normalized_value) << std::endl;
             }
-            std::cout << std::endl;
         }
     }
 
-    png_write_image(png, row_pointers.data());
-    png_write_end(png, NULL);
-
-    for (int y = 0; y < height; y++) {
-        free(row_pointers[y]);
+    // Write the normalized depth image to a PNG file using OpenCV
+    if (!cv::imwrite(filename, depth_image)) {
+        std::cerr << "Failed to write PNG file: " << filename << std::endl;
     }
-
-    png_destroy_write_struct(&png, &info);
-    fclose(fp);
 }
 
 bool compare_depth_data(const std::vector<float>& original_data, const std::vector<float>& exr_data, int width, int height, float tolerance = 1e-5) {
@@ -324,6 +207,27 @@ bool compare_depth_data(const std::vector<float>& original_data, const std::vect
 
     std::cout << "Depth data is identical within the tolerance." << std::endl;
     return true;
+}
+
+std::vector<float> read_png_depth_new(const std::string& filename, int& width, int& height, float minVal, float maxVal) {
+    cv::Mat depth_image = cv::imread(filename, cv::IMREAD_GRAYSCALE);
+    if (depth_image.empty()) {
+        std::cerr << "Failed to open PNG file: " << filename << std::endl;
+        exit(1);
+    }
+
+    width = depth_image.cols;
+    height = depth_image.rows;
+
+    std::vector<float> depth_data(width * height);
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            float normalized_value = static_cast<float>(depth_image.at<uint8_t>(y, x)) / 255.0f;
+            depth_data[y * width + x] = normalized_value * (maxVal - minVal) + minVal;
+        }
+    }
+
+    return depth_data;
 }
 
 bool compare_depth_images(const std::vector<float>& original_data, const std::vector<float>& new_data, int width, int height, float tolerance = 1e-5) {
@@ -348,6 +252,7 @@ int main() {
     const std::string png_filename = "/home/eflinspy/CLionProjects/EXRHeader/img.png";
     const std::string exr_filename = "depth_image.exr";
     const std::string txt_filename = "depth_data.txt";
+    const std::string orgtxt_filename = "orgdepth_data.txt";
     const std::string output_png_filename = "output_depth.png";
 
     float minVal = 71.4000015258789f; // Replace with actual minVal used during normalization
@@ -358,6 +263,8 @@ int main() {
     if (depth_data.empty()) {
         return 1;
     }
+
+    write_depth_data_to_text(orgtxt_filename, depth_data, width, height, minVal, maxVal);
 
     FILE* file = fopen(exr_filename.c_str(), "wb");
     if (!file) {
@@ -390,7 +297,7 @@ int main() {
 
     // Read the newly created PNG depth data
     int new_width, new_height;
-    std::vector<float> new_depth_data = read_png_depth(output_png_filename, new_width, new_height, minVal, maxVal);
+    std::vector<float> new_depth_data = read_png_depth_new(output_png_filename, new_width, new_height, minVal, maxVal);
 
     // Compare the original PNG depth data with the newly created PNG depth data
     if (!compare_depth_images(depth_data, new_depth_data, width, height)) {
