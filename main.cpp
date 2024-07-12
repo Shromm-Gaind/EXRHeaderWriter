@@ -8,6 +8,7 @@
 #include <fstream>
 #include <png.h>
 #include <cmath>
+#include <algorithm>
 
 #define INTEL_ORDER32(x) (x)
 #define GCC_PACK __attribute__((packed))
@@ -234,7 +235,6 @@ std::vector<float> read_exr_depth(const std::string& filename, int& width, int& 
     return depth_data;
 }
 
-
 void write_png_depth(const std::string& filename, const std::vector<float>& depth_data, int width, int height, float minVal, float maxVal) {
     FILE* fp = fopen(filename.c_str(), "wb");
     if (!fp) {
@@ -264,6 +264,8 @@ void write_png_depth(const std::string& filename, const std::vector<float>& dept
         return;
     }
 
+    png_set_user_limits(png, 1000000, 1000000);  // Set user limits to a higher value
+
     png_init_io(png, fp);
 
     png_set_IHDR(
@@ -274,21 +276,31 @@ void write_png_depth(const std::string& filename, const std::vector<float>& dept
 
     png_write_info(png, info);
 
-    // Create row pointers
+    // Print dimensions for debugging
+    std::cout << "Writing PNG: Width = " << width << ", Height = " << height << std::endl;
+
     std::vector<png_bytep> row_pointers(height);
     for (int y = 0; y < height; y++) {
         row_pointers[y] = (png_byte*)malloc(width * sizeof(png_byte));
         for (int x = 0; x < width; x++) {
             float value = depth_data[y * width + x];
-            png_byte normalized_value = static_cast<png_byte>(((value - minVal) / (maxVal - minVal)) * 255.0f);
+            png_byte normalized_value = static_cast<png_byte>(std::round(((value - minVal) / (maxVal - minVal)) * 255.0f));
             row_pointers[y][x] = normalized_value;
+        }
+
+        // Print values for each row for debugging
+        if (y < 3 || y > height - 3) {  // Print first and last 3 rows
+            std::cout << "Row " << y << ": ";
+            for (int x = 0; x < std::min(width, 10); ++x) {
+                std::cout << static_cast<int>(row_pointers[y][x]) << " ";
+            }
+            std::cout << std::endl;
         }
     }
 
     png_write_image(png, row_pointers.data());
     png_write_end(png, NULL);
 
-    // Free memory
     for (int y = 0; y < height; y++) {
         free(row_pointers[y]);
     }
@@ -313,6 +325,24 @@ bool compare_depth_data(const std::vector<float>& original_data, const std::vect
     std::cout << "Depth data is identical within the tolerance." << std::endl;
     return true;
 }
+
+bool compare_depth_images(const std::vector<float>& original_data, const std::vector<float>& new_data, int width, int height, float tolerance = 1e-5) {
+    if (original_data.size() != new_data.size()) {
+        std::cerr << "Data size mismatch: Original (" << original_data.size() << ") vs New (" << new_data.size() << ")" << std::endl;
+        return false;
+    }
+
+    for (size_t i = 0; i < original_data.size(); ++i) {
+        if (std::fabs(original_data[i] - new_data[i]) > tolerance) {
+            std::cerr << "Mismatch at index " << i << ": Original (" << original_data[i] << ") vs New (" << new_data[i] << ")" << std::endl;
+            return false;
+        }
+    }
+
+    std::cout << "Depth images are identical within the tolerance." << std::endl;
+    return true;
+}
+
 
 int main() {
     const std::string png_filename = "/home/eflinspy/CLionProjects/EXRHeader/img.png";
@@ -349,8 +379,24 @@ int main() {
         return 1;
     }
 
+    // Verify min and max values in the depth data
+    float actual_min = *std::min_element(read_depth_data.begin(), read_depth_data.end());
+    float actual_max = *std::max_element(read_depth_data.begin(), read_depth_data.end());
+    std::cout << "Actual Min Depth Value: " << actual_min << std::endl;
+    std::cout << "Actual Max Depth Value: " << actual_max << std::endl;
+
     // Write depth data from EXR to a new PNG file
     write_png_depth(output_png_filename, read_depth_data, width, height, minVal, maxVal);
+
+    // Read the newly created PNG depth data
+    int new_width, new_height;
+    std::vector<float> new_depth_data = read_png_depth(output_png_filename, new_width, new_height, minVal, maxVal);
+
+    // Compare the original PNG depth data with the newly created PNG depth data
+    if (!compare_depth_images(depth_data, new_depth_data, width, height)) {
+        std::cerr << "Depth data mismatch between original PNG and new PNG file." << std::endl;
+        return 1;
+    }
 
     return 0;
 }
