@@ -8,7 +8,6 @@
 #include <fstream>
 #include <png.h>
 
-
 #define INTEL_ORDER32(x) (x)
 #define GCC_PACK __attribute__((packed))
 
@@ -29,7 +28,13 @@ struct Channel {
 struct ExrHeader {
     uint32_t magic_number;
     uint32_t version;
-    char attributes[1024]; // Increased size to ensure space for attributes
+    uint32_t chunkCount;
+    Box2i dataWindow;
+    Box2i displayWindow;
+    float pixelAspectRatio;
+    int32_t lineOrder;
+    char channels[64];
+    char compression[32];
 } GCC_PACK;
 
 void write_string_attr(char* buffer, const std::string& key, const std::string& value) {
@@ -78,26 +83,23 @@ void write_channel_attr(char* buffer, const std::string& key, const std::vector<
 
 void create_exr_header(FILE* file, int width, int height) {
     ExrHeader header{};
-    header.magic_number = INTEL_ORDER32(0x762f5020);
-    header.version = INTEL_ORDER32(2);
+    header.magic_number = INTEL_ORDER32(20000630);  // OpenEXR magic number
+    header.version = INTEL_ORDER32(2);  // Version number
+    header.chunkCount = 1;
 
-    char* attributes = header.attributes;
-    memset(attributes, 0, sizeof(header.attributes));
+    header.dataWindow = {0, 0, width - 1, height - 1};
+    header.displayWindow = {0, 0, width - 1, height - 1};
+    header.pixelAspectRatio = 1.0;
+    header.lineOrder = INTEL_ORDER32(0);  // Increasing Y
 
-    Box2i data_window = {0, 0, width - 1, height - 1};
-    Box2i display_window = {0, 0, width - 1, height - 1};
-    Channel channel = {"Z", INTEL_ORDER32(2), 1, {0}}; // 'Z' channel, 32-bit float
+    std::vector<Channel> channels = {{"Z", INTEL_ORDER32(2), 1, {0}}};  // 'Z' channel, 32-bit float
+    memset(header.channels, 0, sizeof(header.channels));
+    write_channel_attr(header.channels, "channels", channels);
 
-    write_box2i_attr(attributes, "dataWindow", data_window);
-    write_box2i_attr(attributes, "displayWindow", display_window);
-    write_int_attr(attributes, "lineOrder", 0); // Increasing Y
-    write_channel_attr(attributes, "channels", {channel}); // Single 'Z' channel
-    write_string_attr(attributes, "compression", "PIZ_COMPRESSION");
-    write_int_attr(attributes, "pixelAspectRatio", 1);
+    memset(header.compression, 0, sizeof(header.compression));
+    strcpy(header.compression, "PIZ_COMPRESSION");
 
     fwrite(&header, sizeof(ExrHeader), 1, file);
-    fwrite(attributes, sizeof(header.attributes), 1, file);
-    fputc('\0', file);
 }
 
 std::vector<float> read_png_depth(const std::string& filename, int& width, int& height, float minVal, float maxVal) {
@@ -129,6 +131,7 @@ std::vector<float> read_png_depth(const std::string& filename, int& width, int& 
         exit(1);
     }
 
+    png_set_user_limits(png, 1000000, 1000000);  // Set user limits to a higher value
     png_init_io(png, fp);
     png_read_info(png, info);
 
@@ -136,6 +139,8 @@ std::vector<float> read_png_depth(const std::string& filename, int& width, int& 
     height = png_get_image_height(png, info);
     png_byte color_type = png_get_color_type(png, info);
     png_byte bit_depth = png_get_bit_depth(png, info);
+
+    std::cout << "PNG Width: " << width << " Height: " << height << " Color Type: " << static_cast<int>(color_type) << " Bit Depth: " << static_cast<int>(bit_depth) << std::endl;
 
     if (bit_depth == 16)
         png_set_strip_16(png);
@@ -196,7 +201,7 @@ void write_depth_data_to_text(const std::string& filename, const std::vector<flo
     outfile << "Height: " << height << "\n";
     outfile << "Min Depth Value: " << minVal << "\n";
     outfile << "Max Depth Value: " << maxVal << "\n";
-    outfile << "Depth Data:\n";
+    //outfile << "Depth Data:\n";
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
@@ -208,17 +213,99 @@ void write_depth_data_to_text(const std::string& filename, const std::vector<flo
     outfile.close();
 }
 
+std::vector<float> read_exr_depth(const std::string& filename, int& width, int& height) {
+    FILE* file = fopen(filename.c_str(), "rb");
+    if (!file) {
+        std::cerr << "Failed to open EXR file: " << filename << std::endl;
+        return {};
+    }
+
+    ExrHeader header;
+    fread(&header, sizeof(ExrHeader), 1, file);
+
+    width = header.dataWindow.max_x - header.dataWindow.min_x + 1;
+    height = header.dataWindow.max_y - header.dataWindow.min_y + 1;
+
+    std::vector<float> depth_data(width * height);
+    fread(depth_data.data(), sizeof(float), width * height, file);
+
+    fclose(file);
+    return depth_data;
+}
+
+void write_png_depth(const std::string& filename, const std::vector<float>& depth_data, int width, int height, float minVal, float maxVal) {
+    FILE* fp = fopen(filename.c_str(), "wb");
+    if (!fp) {
+        std::cerr << "Failed to open PNG file for writing: " << filename << std::endl;
+        return;
+    }
+
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png) {
+        std::cerr << "Failed to create PNG write struct" << std::endl;
+        fclose(fp);
+        return;
+    }
+
+    png_infop info = png_create_info_struct(png);
+    if (!info) {
+        std::cerr << "Failed to create PNG info struct" << std::endl;
+        png_destroy_write_struct(&png, NULL);
+        fclose(fp);
+        return;
+    }
+
+    if (setjmp(png_jmpbuf(png))) {
+        std::cerr << "Error during PNG creation" << std::endl;
+        png_destroy_write_struct(&png, &info);
+        fclose(fp);
+        return;
+    }
+
+    png_init_io(png, fp);
+
+    png_set_IHDR(
+            png, info, width, height,
+            8, PNG_COLOR_TYPE_GRAY, PNG_INTERLACE_NONE,
+            PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT
+    );
+
+    png_write_info(png, info);
+
+    std::vector<png_bytep> row_pointers(height);
+    for (int y = 0; y < height; y++) {
+        row_pointers[y] = (png_byte*)malloc(width * sizeof(png_byte));
+        for (int x = 0; x < width; x++) {
+            float value = depth_data[y * width + x];
+            png_byte normalized_value = static_cast<png_byte>(((value - minVal) / (maxVal - minVal)) * 255.0f);
+            row_pointers[y][x] = normalized_value;
+        }
+    }
+
+    png_write_image(png, row_pointers.data());
+    png_write_end(png, NULL);
+
+    for (int y = 0; y < height; y++) {
+        free(row_pointers[y]);
+    }
+
+    png_destroy_write_struct(&png, &info);
+    fclose(fp);
+}
+
 int main() {
     const std::string png_filename = "/home/eflinspy/CLionProjects/EXRHeader/img.png";
     const std::string exr_filename = "depth_image.exr";
     const std::string txt_filename = "depth_data.txt";
+    const std::string orgtxt_filename = "orgdepth_data.txt";
+    const std::string output_png_filename = "output_depth.png";
 
-    // These values need to be the same as those used during normalization
-    float minVal = 71.4000015258789f; // minVal
-    float maxVal = 500.0f; //  maxVal
+    float minVal = 71.4000015258789f; // Replace with actual minVal used during normalization
+    float maxVal = 500.0f; // Replace with actual maxVal used during normalization
 
     int width, height;
     std::vector<float> depth_data = read_png_depth(png_filename, width, height, minVal, maxVal);
+    write_depth_data_to_text(orgtxt_filename, depth_data, width, height, minVal, maxVal);
     if (depth_data.empty()) {
         return 1;
     }
@@ -230,12 +317,15 @@ int main() {
     }
 
     create_exr_header(file, width, height);
-
     fwrite(depth_data.data(), sizeof(float), width * height, file);
-
     fclose(file);
 
-    write_depth_data_to_text(txt_filename, depth_data, width, height, minVal, maxVal);
+    // Read depth data from EXR and write it to a text file
+    std::vector<float> read_depth_data = read_exr_depth(exr_filename, width, height);
+    write_depth_data_to_text(txt_filename, read_depth_data, width, height, minVal, maxVal);
+
+    // Write depth data from EXR to a new PNG file
+    write_png_depth(output_png_filename, read_depth_data, width, height, minVal, maxVal);
 
     return 0;
 }
