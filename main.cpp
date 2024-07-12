@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <png.h>
+#include <cmath>
 
 #define INTEL_ORDER32(x) (x)
 #define GCC_PACK __attribute__((packed))
@@ -233,6 +234,7 @@ std::vector<float> read_exr_depth(const std::string& filename, int& width, int& 
     return depth_data;
 }
 
+
 void write_png_depth(const std::string& filename, const std::vector<float>& depth_data, int width, int height, float minVal, float maxVal) {
     FILE* fp = fopen(filename.c_str(), "wb");
     if (!fp) {
@@ -272,6 +274,7 @@ void write_png_depth(const std::string& filename, const std::vector<float>& dept
 
     png_write_info(png, info);
 
+    // Create row pointers
     std::vector<png_bytep> row_pointers(height);
     for (int y = 0; y < height; y++) {
         row_pointers[y] = (png_byte*)malloc(width * sizeof(png_byte));
@@ -285,6 +288,7 @@ void write_png_depth(const std::string& filename, const std::vector<float>& dept
     png_write_image(png, row_pointers.data());
     png_write_end(png, NULL);
 
+    // Free memory
     for (int y = 0; y < height; y++) {
         free(row_pointers[y]);
     }
@@ -293,11 +297,27 @@ void write_png_depth(const std::string& filename, const std::vector<float>& dept
     fclose(fp);
 }
 
+bool compare_depth_data(const std::vector<float>& original_data, const std::vector<float>& exr_data, int width, int height, float tolerance = 1e-5) {
+    if (original_data.size() != exr_data.size()) {
+        std::cerr << "Data size mismatch: Original (" << original_data.size() << ") vs EXR (" << exr_data.size() << ")" << std::endl;
+        return false;
+    }
+
+    for (size_t i = 0; i < original_data.size(); ++i) {
+        if (std::fabs(original_data[i] - exr_data[i]) > tolerance) {
+            std::cerr << "Mismatch at index " << i << ": Original (" << original_data[i] << ") vs EXR (" << exr_data[i] << ")" << std::endl;
+            return false;
+        }
+    }
+
+    std::cout << "Depth data is identical within the tolerance." << std::endl;
+    return true;
+}
+
 int main() {
     const std::string png_filename = "/home/eflinspy/CLionProjects/EXRHeader/img.png";
     const std::string exr_filename = "depth_image.exr";
     const std::string txt_filename = "depth_data.txt";
-    const std::string orgtxt_filename = "orgdepth_data.txt";
     const std::string output_png_filename = "output_depth.png";
 
     float minVal = 71.4000015258789f; // Replace with actual minVal used during normalization
@@ -305,7 +325,6 @@ int main() {
 
     int width, height;
     std::vector<float> depth_data = read_png_depth(png_filename, width, height, minVal, maxVal);
-    write_depth_data_to_text(orgtxt_filename, depth_data, width, height, minVal, maxVal);
     if (depth_data.empty()) {
         return 1;
     }
@@ -323,6 +342,12 @@ int main() {
     // Read depth data from EXR and write it to a text file
     std::vector<float> read_depth_data = read_exr_depth(exr_filename, width, height);
     write_depth_data_to_text(txt_filename, read_depth_data, width, height, minVal, maxVal);
+
+    // Compare the original and EXR depth data
+    if (!compare_depth_data(depth_data, read_depth_data, width, height)) {
+        std::cerr << "Depth data mismatch between original PNG and EXR file." << std::endl;
+        return 1;
+    }
 
     // Write depth data from EXR to a new PNG file
     write_png_depth(output_png_filename, read_depth_data, width, height, minVal, maxVal);
